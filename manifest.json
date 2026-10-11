@@ -58,9 +58,7 @@
   ],
   "contributes": {
     "auth": {
-      "sshAuthTypes": [
-        "opkssh"
-      ]
+      "sshAuthTypes": ["opkssh"]
     },
     "settings": {
       "admin": [
@@ -71,14 +69,8 @@
         }
       ]
     },
-    "uses": [
-      "terminal.overlay"
-    ]
+    "uses": ["terminal.overlay"]
   },
   "locales": "locales",
-  "platforms": [
-    "linux",
-    "win32",
-    "darwin"
-  ]
+  "platforms": ["linux", "win32", "darwin"]
 }
