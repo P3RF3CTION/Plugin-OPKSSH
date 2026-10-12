@@ -4,8 +4,8 @@ Termix ships a pinned, checksum verified copy of `opkssh`, so there is nothing t
 
 ## Before you start
 
-- **Each host** needs OPKSSH installed and set up to trust your identity provider and your user. Follow the [OPKSSH install guide](https://github.com/openpubkey/opkssh#getting-started).
-- **An OAuth client** at your identity provider, with a client ID and secret.
+- Each host needs OPKSSH installed and set up to trust your identity provider and your user. Follow the [OPKSSH install guide](https://github.com/openpubkey/opkssh#getting-started).
+- An OAuth client at your identity provider, with a client ID and secret.
 
 ## Set it up
 
@@ -39,6 +39,6 @@ The certificate is kept for 24 hours, so you sign in about once a day. It works 
 
 ## Troubleshooting
 
-- **The config file can't be written.** In Docker, make sure `/app/data` is a volume the container's user can write.
-- **The provider says the redirect URI is wrong.** Register the exact Redirect URI from settings, including the scheme. Behind a reverse proxy, make sure it sends `X-Forwarded-Proto`.
-- **The host refuses the certificate.** Check the host's OPKSSH policy lists your email and provider.
+- The config file can't be written: In Docker, make sure `/app/data` is a volume the container's user can write.
+- The provider says the redirect URI is wrong: Register the exact Redirect URI from settings, including the scheme. Behind a reverse proxy, make sure it sends `X-Forwarded-Proto`.
+- The host refuses the certificate: Check the host's OPKSSH policy lists your email and provider.
