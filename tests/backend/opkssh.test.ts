@@ -1,9 +1,12 @@
 import fs from "node:fs/promises";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PluginCapabilityError } from "@termix-ssh/plugin-sdk/backend";
 import { createMockCtx, createTestDb } from "@termix-ssh/plugin-sdk/testing";
 import { AUTH_TIMEOUT_MS } from "../../src/backend/auth-session.js";
+import { oauthStatesInHtml } from "../../src/backend/routes.js";
 import {
   HOST,
   LEGACY_DDL,
@@ -320,41 +323,97 @@ describe("routes", () => {
     );
   });
 
-  it("forwards the identity provider's callback to the sign-in it belongs to", async () => {
+  it("forwards the identity provider's callback to the sign-in whose chooser carried the state", async () => {
+    // Stands in for OPKSSH's local chooser: a page with a provider link
+    // carrying the OAuth state.
+    const chooser = http.createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end(
+        '<a href="https://idp.example/authorize?client_id=c&state=st-123&redirect_uri=x">Sign in</a>',
+      );
+    });
+    await new Promise<void>((resolve) =>
+      chooser.listen(0, "127.0.0.1", resolve),
+    );
+    const chooserPort = (chooser.address() as AddressInfo).port;
+    try {
+      server = await startServer();
+      await writeConfig();
+      const socket = await startSignIn();
+      server.processes[0].emitStderr(
+        `Opening browser to http://localhost:${chooserPort}/chooser\n`,
+      );
+      const requestId = String(
+        socket.sent.find((m) => m.type === "opkssh_status")?.requestId,
+      );
+
+      const page = await server.request("GET", `/chooser/${requestId}`, {
+        user: "",
+      });
+      expect(page.status).toBe(200);
+      // No request-id cookie is planted any more.
+      expect(String(page.setCookie ?? "")).not.toContain("opkssh_request_id");
+
+      // OPKSSH's callback listener is not up yet.
+      expect(
+        (
+          await server.request("GET", "/callback?code=x&state=st-123", {
+            user: "",
+          })
+        ).status,
+      ).toBe(503);
+
+      // The state was taken by that attempt; the chooser registers it again.
+      await server.request("GET", `/chooser/${requestId}`, { user: "" });
+      server.processes[0].emitStderr("listening on http://127.0.0.1:5555/\n");
+      const forwarded = await server.request(
+        "GET",
+        "/callback?code=x&state=st-123",
+        { user: "" },
+      );
+      expect(forwarded.status).toBe(302);
+      expect(forwarded.location).toBe(
+        `/plugin-api/opkssh/callback/${requestId}?code=x&state=st-123`,
+      );
+
+      expect(
+        (await server.request("GET", "/callback?code=x", { user: "" })).status,
+      ).toBe(401);
+    } finally {
+      await new Promise((resolve) => chooser.close(resolve));
+    }
+  });
+
+  it("does not match a callback by an opkssh_request_id cookie", async () => {
     server = await startServer();
     await writeConfig();
     const socket = await startSignIn();
     server.processes[0].emitStderr(
       "Opening browser to http://localhost:4567/chooser\n",
     );
+    server.processes[0].emitStderr("listening on http://127.0.0.1:5555/\n");
     const requestId = String(
       socket.sent.find((m) => m.type === "opkssh_status")?.requestId,
     );
-    const cookie = { cookie: `opkssh_request_id=${requestId}` };
-
-    // OPKSSH's callback listener is not up yet.
-    expect(
-      (
-        await server.request("GET", "/callback?code=x", {
-          user: "",
-          headers: cookie,
-        })
-      ).status,
-    ).toBe(503);
-
-    server.processes[0].emitStderr("listening on http://127.0.0.1:5555/\n");
-    const forwarded = await server.request("GET", "/callback?code=x&state=s", {
-      user: "",
-      headers: cookie,
-    });
-    expect(forwarded.status).toBe(302);
-    expect(forwarded.location).toBe(
-      `/plugin-api/opkssh/callback/${requestId}?code=x&state=s`,
+    // An attacker's request id planted in the victim's browser must not
+    // route the victim's callback (and certificate) to the attacker's sign-in.
+    const response = await server.request(
+      "GET",
+      "/callback?code=x&state=unseen",
+      {
+        user: "",
+        headers: { cookie: `opkssh_request_id=${requestId}` },
+      },
     );
+    expect(response.status).toBe(401);
+  });
 
+  it("finds OAuth state values in a chooser page", () => {
     expect(
-      (await server.request("GET", "/callback?code=x", { user: "" })).status,
-    ).toBe(401);
+      oauthStatesInHtml(
+        '<a href="https://a/auth?x=1&state=abc">a</a><a href="https://b/auth?state=d%2Be">b</a>',
+      ).sort(),
+    ).toEqual(["abc", "d+e"]);
   });
 
   it("answers an unknown sign-in with a not-found page", async () => {
