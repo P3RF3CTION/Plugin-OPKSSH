@@ -7,7 +7,6 @@ import {
   rewriteOpksshHtml,
 } from "./html.js";
 import {
-  AUTH_TIMEOUT_MS,
   PLUGIN_PATH,
   type AuthSession,
   type AuthSessions,
@@ -17,8 +16,8 @@ import type { TokenStore } from "./token-store.js";
 /**
  * The browser reaches these without a Termix session: the sign-in may finish
  * in a different browser, and the identity provider redirects to /callback.
- * Each is matched to its sign-in by the request id, the OAuth state or the
- * opkssh_request_id cookie.
+ * Each is matched to its sign-in by the request id or the OAuth state that
+ * this server saw in OPKSSH's chooser (redirect or page), never by a cookie.
  */
 export const PUBLIC_PATHS = [
   "/chooser/:requestId",
@@ -49,6 +48,21 @@ function readCookie(req: Request, name: string): string | undefined {
     if (key === name) return decodeURIComponent(rest.join("="));
   }
   return undefined;
+}
+
+/** OAuth state values written into a page, e.g. in the provider links. */
+export function oauthStatesInHtml(html: string): string[] {
+  const found = new Set<string>();
+  for (const match of html.matchAll(/[?&#;]state=([A-Za-z0-9._~\-+/=%]+)/g)) {
+    let state = match[1];
+    try {
+      state = decodeURIComponent(state);
+    } catch {
+      // keep the raw value
+    }
+    if (state) found.add(state);
+  }
+  return [...found];
 }
 
 function param(value: string | string[] | undefined): string {
@@ -457,21 +471,21 @@ export function registerRoutes(
         }
       }
 
-      // Survives the identity provider round trip, for when OPKSSH
-      // redirects with script and no state was captured.
-      res.cookie(REQUEST_COOKIE, requestId, {
-        path: `${base}/`,
-        httpOnly: true,
-        sameSite: "lax",
-        maxAge: AUTH_TIMEOUT_MS,
-      });
-
+      // No request-id cookie: /chooser/:requestId is public, so anyone could
+      // send a victim their own chooser link and plant their request id in
+      // the victim's browser; a later callback of the victim would then have
+      // been matched by that cookie to the attacker's sign-in, which receives
+      // a certificate for the victim's identity. A callback is matched only
+      // by OAuth state this server saw: from a redirect (above) or written in
+      // the chooser page OPKSSH serves (below).
       const contentType = String(response.headers["content-type"] || "");
       const data = Buffer.from(response.data as ArrayBuffer);
       if (contentType.includes("text/html")) {
-        res
-          .status(response.status)
-          .send(rewriteOpksshHtml(data.toString("utf-8"), chooserBase));
+        const html = data.toString("utf-8");
+        for (const state of oauthStatesInHtml(html)) {
+          sessions.registerOAuthState(state, requestId);
+        }
+        res.status(response.status).send(rewriteOpksshHtml(html, chooserBase));
       } else {
         res.status(response.status).send(data);
       }
@@ -495,7 +509,7 @@ export function registerRoutes(
    * /plugin-api/opkssh/callback:
    *   get:
    *     summary: OAuth callback from the identity provider for an OPKSSH sign-in
-   *     description: Public. The redirect URI registered with the identity provider. Finds the sign-in by OAuth state or the opkssh_request_id cookie and forwards to its proxied callback listener.
+   *     description: Public. The redirect URI registered with the identity provider. Finds the sign-in by the OAuth state seen in OPKSSH's chooser and forwards to its proxied callback listener.
    *     tags: [OPKSSH]
    *     responses:
    *       302:
@@ -508,13 +522,11 @@ export function registerRoutes(
   router.get("/callback", (req: Request, res: Response) => {
     const base = prefix(req);
     const state = typeof req.query.state === "string" ? req.query.state : "";
-    let session = state ? sessions.takeByOAuthState(state) : undefined;
-    if (!session) {
-      const cookieId = readCookie(req, REQUEST_COOKIE);
-      if (cookieId) {
-        session = sessions.get(cookieId);
-        if (session) res.clearCookie(REQUEST_COOKIE, { path: `${base}/` });
-      }
+    const session = state ? sessions.takeByOAuthState(state) : undefined;
+    // Drop a request-id cookie left over from versions that set one; it is
+    // no longer read.
+    if (readCookie(req, REQUEST_COOKIE)) {
+      res.clearCookie(REQUEST_COOKIE, { path: `${base}/` });
     }
     if (!session) {
       ctx.log.warn("OPKSSH callback matched no sign-in");
